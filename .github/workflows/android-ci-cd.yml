@@ -1,0 +1,97 @@
+name: AiGram Android CI/CD
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools" \
+            "ndk;27.2.12479018" \
+            "cmake;3.22.1"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build AiGram AAB and APK variants
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --no-parallel --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
+            --stacktrace \
+            :TMessagesProj_App:bundleBundleAfatRelease \
+            :TMessagesProj_AppStandalone:assembleAfatStandalone \
+            :TMessagesProj_AppHuawei:assembleAfatRelease
+
+      - name: Upload Android build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: aigram-android-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            TMessagesProj_App/build/outputs/bundle/bundleAfatRelease/*.aab
+            TMessagesProj_AppStandalone/build/outputs/apk/afatStandalone/*.apk
+            TMessagesProj_AppHuawei/build/outputs/apk/afatRelease/*.apk
+            TMessagesProj_App/build/outputs/mapping/**/*
+            TMessagesProj_AppStandalone/build/outputs/mapping/**/*
+            TMessagesProj_AppHuawei/build/outputs/mapping/**/*
+
+  draft-release:
+    name: Prepare draft GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download build outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: aigram-android-${{ github.sha }}
+          path: release-assets
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            release-assets/**/*.aab
+            release-assets/**/*.apk
